@@ -5,16 +5,17 @@ import socket
 from time import sleep
 import struct
 
-
 PORT = 9999
+# BUFFER_SIZE = 64
 IP = ""
-BUFFER_SIZE = 64
+BUFFER_SIZE = 128
 
 def listen_udp(tplink):
     """
     Opens port to listen for UDP requests
     Responds based on the utilised API
     """
+    print(f"Announcing TPLink on UDP port {PORT}")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((IP, PORT))
@@ -24,6 +25,7 @@ def listen_udp(tplink):
         print(f"Received from address: {address}")
         response = tplink.commands_api(data, "udp")
         if response:
+            print(response)
             sock.sendto(response, address)
 
 def listen_tcp(tplink):
@@ -31,6 +33,7 @@ def listen_tcp(tplink):
     Opens port to listen for TCP requests
     Responds based on the utilised API
     """
+    print(f"TPLink listening for requests on TCP port {PORT}")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((IP, PORT))
@@ -159,6 +162,7 @@ class TPLink:
         self.consumption = Thread(target=self.simulate_consumption, daemon=True)
         self.consumption.start()
         self.commandMap = {
+            '{"system":{"get_sysinfo":{}},"cnCloud":{"get_info":{}},"smartlife.iot.common.cloud":{"get_info":{}},"smartlife.cam.ipcamera.cloud":{"get_info":{}}}' : getattr(self, "get_sys_info"),
             '{"system":{"get_sysinfo":{}}}': getattr(self, "get_sys_info"),
             '{"emeter":{"get_realtime":{}}}': getattr(self, "emeter"),
             '{"system":{"set_relay_state":{"state":1}}}': getattr(self, "turn_relay_on"),
@@ -220,7 +224,7 @@ class TPLink:
         })
         return encrypt(response, add_suffix=add_suffix)
 
-    def turn_relay_on(self, _):
+    def turn_relay_on(self):
         """
         Simulates the toggle relay turn on
         Changes the measurements only if a load is plugged in
@@ -232,7 +236,7 @@ class TPLink:
             self.voltage = self.load_nominals["voltage"]
             self.current = self.load_nominals["current"]
 
-    def turn_relay_off(self, _):
+    def turn_relay_off(self):
         """
         Simulates the toggle relay turn of
         Changes the measurements to 0
@@ -297,7 +301,11 @@ class TPLink:
             strip_suffix = False
         command = decrypt(command, strip_suffix=strip_suffix)
         try:
-            return self.commandMap[command](protocol)
+            if 'context' in command:
+                print(self.commandMap[command['context']['system']])
+                return self.commandMap[command['context']['system']](protocol)
+            else:
+                self.commandMap[command](protocol)
         except KeyError:
             print(f"Not supported command: {command}")
             return None
