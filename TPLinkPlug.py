@@ -8,7 +8,7 @@ import struct
 PORT = 9999
 # BUFFER_SIZE = 64
 IP = ""
-BUFFER_SIZE = 128
+BUFFER_SIZE = 256
 
 def listen_udp(tplink):
     """
@@ -22,10 +22,8 @@ def listen_udp(tplink):
 
     while True:
         data, address = sock.recvfrom(BUFFER_SIZE)
-        print(f"Received from address: {address}")
         response = tplink.commands_api(data, "udp")
         if response:
-            print(response)
             sock.sendto(response, address)
 
 def listen_tcp(tplink):
@@ -123,7 +121,7 @@ def random_longitude():
 
 
 class TPLink:
-    def __init__(self, *, alias="HS110 Mock", model="HS110(UK)", mac=random_mac(), init_relay_state=0, init_led_off=0, init_total=0):
+    def __init__(self, *, alias="KP105(UK)", model="KP115(UK)", mac=random_mac(), init_relay_state=0, init_led_off=0, init_total=0):
         """Instatiates a TPLink device with given properties and initial states"""
         self.sw_ver = "1.0.8 Build 151113 Rel.24658"
         self.hw_ver = "1.0"
@@ -162,11 +160,16 @@ class TPLink:
         self.consumption = Thread(target=self.simulate_consumption, daemon=True)
         self.consumption.start()
         self.commandMap = {
-            '{"system":{"get_sysinfo":{}},"cnCloud":{"get_info":{}},"smartlife.iot.common.cloud":{"get_info":{}},"smartlife.cam.ipcamera.cloud":{"get_info":{}}}' : getattr(self, "get_sys_info"),
             '{"system":{"get_sysinfo":{}}}': getattr(self, "get_sys_info"),
             '{"emeter":{"get_realtime":{}}}': getattr(self, "emeter"),
             '{"system":{"set_relay_state":{"state":1}}}': getattr(self, "turn_relay_on"),
-            '{"system":{"set_relay_state":{"state":0}}}': getattr(self, "turn_relay_off"),
+            '{"system":{"set_relay_state":{"state":0}}}': getattr(self, "turn_relay_off")
+
+        }
+        self.commandMap_v2 = {
+            'get_sys_info' : getattr(self, "get_sys_info_v2"),
+            'emeter' : getattr(self, "emeter_v2"),
+            'set_relay_state' : getattr(self, "toggle_relay_v2")
         }
 
     def get_sys_info(self, protocol):
@@ -246,7 +249,92 @@ class TPLink:
         self.power = 0
         self.voltage = 0
         self.current = 0
+
+    def get_sys_info_v2(self, body, protocol):
+        """Responds to '{
+            "system":{"get_sysinfo":{}},
+            "cnCloud":{"get_info":{}},
+            "smartlife.iot.common.cloud":{"get_info":{}},
+            "smartlife.cam.ipcamera.cloud":{"get_info":{}}
+            }' command"""
+        add_suffix = True
+        if protocol == "udp":
+            add_suffix = False
         
+        response = json.loads(body)
+        response["system"] = {
+            "get_sysinfo": {
+                "sw_ver": self.sw_ver,
+                "hw_ver": self.hw_ver,
+                "type": self.type,
+                "model": self.model,
+                "dev_name": self.dev_name,
+                "icon_hash": self.icon_hash,
+                "relay_state": self.relay_state,
+                "on_time": self.on_time,
+                "active_mode": self.active_mode,
+                "feature": self.feature,
+                "updating": self.updating,
+                "rssi": self.rssi,
+                "led_off": self.led_off,
+                "alias": self.alias,
+                "mac": self.mac,
+                "deviceId": self.deviceId,
+                "hwId": self.hwId,
+                "oemId": self.oemId,
+                "latitude": str(self.latitude),
+                "latitude_i": self.latitude_i,
+                "longitude": str(self.longitude),
+                "longitude_i": self.longitude_i,
+                "err_code": self.err_code
+            }
+        }
+        response = json.dumps(response)
+        return encrypt(response, add_suffix=add_suffix)
+
+
+    def emeter_v2(self, body, protocol):
+        """Responds to '{"emeter":{"get_realtime":{}}}' command"""
+        add_suffix = True
+        if protocol == "udp":
+            add_suffix = False
+        
+        response = json.loads(body)
+        response["emeter"] = {
+                "get_realtime":
+                    {
+                        "current": self.current,
+                        "voltage": self.voltage,
+                        "power": self.power,
+                        "total": self.total,
+                        "err_code": self.err_code
+                    }
+            }
+        response = json.dumps(response)
+        return encrypt(response, add_suffix=add_suffix)
+
+    def toggle_relay_v2(self, body, protocol):
+        add_suffix = True
+        if protocol == "udp":
+            add_suffix = False
+        
+        command = json.loads(body)
+        if command['system']['set_relay_state']['state'] == 1:
+            print("Relay toggle on")
+            self.relay_state = 1
+            if self.load_on:
+                self.power = self.load_nominals["power"]
+                self.voltage = self.load_nominals["voltage"]
+                self.current = self.load_nominals["current"]
+        else:
+            print("Relay toggle off")
+            self.relay_state = 0
+            self.power = 0
+            self.voltage = 0
+            self.current = 0
+        response = json.dumps(command)
+        return encrypt(response, add_suffix=add_suffix)
+
     def simulate_plug_in(self, *, power = 350, voltage = 220, current = 3):
         """
         Simulates the plug in of a device
@@ -301,11 +389,22 @@ class TPLink:
             strip_suffix = False
         command = decrypt(command, strip_suffix=strip_suffix)
         try:
-            if 'context' in command:
-                print(self.commandMap[command['context']['system']])
-                return self.commandMap[command['context']['system']](protocol)
+            key = 'get_sys_info'
+            if command == '{"system":{"get_sysinfo":{}},"cnCloud":{"get_info":{}},"smartlife.iot.common.cloud":{"get_info":{}},"smartlife.cam.ipcamera.cloud":{"get_info":{}}}':
+                key = 'get_sys_info'
+                return self.commandMap_v2[key](command, protocol)
+            elif 'context' in command:
+                if 'system' in command:
+                    if 'get_sys_info' in command:
+                        key = 'get_sys_info'
+                    elif 'set_relay_state' in command:
+                        key = 'set_relay_state'
+                elif 'emeter' in command:
+                    key = 'emeter'
+                return self.commandMap_v2[key](command, protocol)
             else:
-                self.commandMap[command](protocol)
+                key = command
+                return self.commandMap[key](protocol)
         except KeyError:
             print(f"Not supported command: {command}")
             return None
